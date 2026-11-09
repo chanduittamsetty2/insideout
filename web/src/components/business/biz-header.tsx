@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { LogOut } from "lucide-react";
 import { cn } from "@/lib/format";
+import { useStore } from "@/lib/store";
 import { Logo } from "../ui";
 
 const NAV = [
@@ -12,6 +14,8 @@ const NAV = [
 
 export function BizHeader({ profileSlug }: { profileSlug?: string }) {
   const path = usePathname();
+  const router = useRouter();
+  const { user, signOut } = useStore();
   return (
     <header className="no-print sticky top-0 z-30 border-b border-line/60 bg-paper/85 backdrop-blur-xl">
       <div className="mx-auto flex max-w-5xl items-center gap-3 px-5 py-3">
@@ -33,6 +37,19 @@ export function BizHeader({ profileSlug }: { profileSlug?: string }) {
             <Link href={`/r/${profileSlug}`} className="hidden rounded-full px-3 py-1.5 text-muted hover:text-ink sm:block">
               Live profile ↗
             </Link>
+          )}
+          {user && (
+            <button
+              onClick={async () => {
+                await signOut();
+                router.push("/business/login");
+              }}
+              title={`Log out ${user.email}`}
+              className="ml-1 grid size-9 place-items-center rounded-full border border-line bg-card text-muted hover:text-ink"
+              aria-label="Log out"
+            >
+              <LogOut className="size-4" />
+            </button>
           )}
         </nav>
       </div>

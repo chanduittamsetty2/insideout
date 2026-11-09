@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Clock, RotateCcw, Sparkles, X } from "lucide-react";
+import { Clock, Loader2, RotateCcw, Sparkles, X } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/format";
 
@@ -17,15 +17,32 @@ const LINKS = [
   { href: "/", label: "📱 Customer app" },
   { href: "/r/nizams-table", label: "⭐ Restaurant profile" },
   { href: "/business", label: "💼 For restaurants" },
+  { href: "/business/login", label: "🔑 Owner login" },
   { href: "/business/onboarding", label: "🚀 Onboarding" },
   { href: "/business/dashboard", label: "📊 Owner dashboard" },
   { href: "/business/qr", label: "🔳 QR kit" },
+  { href: "/admin", label: "🛡️ Admin" },
 ];
 
 export function DemoBar() {
-  const { ready, offsetDays, setOffsetDays, reset } = useStore();
+  const { ready, offsetDays, setOffsetDays, resetDemo, user } = useStore();
   const [open, setOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [msg, setMsg] = useState("");
   if (!ready) return null;
+
+  async function onReset() {
+    setResetting(true);
+    setMsg("");
+    try {
+      await resetDemo();
+      setMsg("Fresh demo data loaded ✨");
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Reset failed");
+    } finally {
+      setResetting(false);
+    }
+  }
 
   return (
     <div className="no-print fixed top-1/2 right-0 z-40 -translate-y-1/2">
@@ -47,6 +64,7 @@ export function DemoBar() {
               </Link>
             ))}
           </div>
+          <p className="mt-2 truncate text-[11px] text-white/50">{user ? `Signed in as ${user.email}` : "Not signed in"}</p>
 
           <p className="mt-4 mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-white/60">
             <Clock className="size-3.5" /> Time travel: watch freshness decay
@@ -67,11 +85,13 @@ export function DemoBar() {
           </div>
 
           <button
-            onClick={() => reset()}
-            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-xl border border-white/15 py-2 text-xs font-semibold text-white/70 hover:bg-white/10"
+            onClick={onReset}
+            disabled={resetting}
+            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-xl border border-white/15 py-2 text-xs font-semibold text-white/70 hover:bg-white/10 disabled:opacity-50"
           >
-            <RotateCcw className="size-3.5" /> Reset demo data
+            {resetting ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />} Reset demo data
           </button>
+          {msg && <p className="mt-2 text-center text-[11px] text-white/70">{msg}</p>}
         </div>
       ) : (
         <button

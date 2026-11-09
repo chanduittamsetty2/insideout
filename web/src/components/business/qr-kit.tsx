@@ -5,8 +5,9 @@ import { QRCodeSVG } from "qrcode.react";
 import { Copy, Printer } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/format";
-import { Button, Logo, Splash } from "../ui";
+import { Button, Logo } from "../ui";
 import { BizHeader } from "./biz-header";
+import { OwnerGate, useOwnerStats } from "./owner-gate";
 
 const PLACEMENTS = [
   { key: "table", label: "Table", emoji: "🪑", headline: "Peek inside our kitchen 👀" },
@@ -17,11 +18,19 @@ const PLACEMENTS = [
 ] as const;
 
 export function QrKit() {
-  const { ready, owner: r } = useStore();
+  return (
+    <OwnerGate>
+      <QrKitInner />
+    </OwnerGate>
+  );
+}
+
+function QrKitInner() {
+  const { owner } = useStore();
+  const r = owner!;
+  const stats = useOwnerStats(r.id);
   const [placement, setPlacement] = useState<(typeof PLACEMENTS)[number]>(PLACEMENTS[0]);
   const [copied, setCopied] = useState(false);
-
-  if (!ready || !r) return <Splash />;
 
   const base = `${window.location.origin}/r/${r.slug}`;
   const url = `${base}?src=${placement.key}`;
@@ -95,7 +104,7 @@ export function QrKit() {
             </div>
             <div className="rounded-[26px] border border-line bg-card p-5">
               <p className="text-sm font-semibold text-muted">Total QR scans</p>
-              <p className="font-display text-4xl font-extrabold">{r.stats.qrScans.toLocaleString("en-IN")}</p>
+              <p className="font-display text-4xl font-extrabold">{stats ? stats.qrScans.toLocaleString("en-IN") : "…"}</p>
             </div>
           </div>
         </div>

@@ -10,29 +10,27 @@ import { SECTIONS, sectionInfo } from "@/lib/sections";
 import { cn, greeting, num } from "@/lib/format";
 import type { SectionKey } from "@/lib/types";
 import { CameraCapture } from "../camera-capture";
-import { Button, Field, FreshChip, Media, ScoreRing, Sheet, Splash, inputCls } from "../ui";
+import { Button, Field, FreshChip, Media, ScoreRing, Sheet, inputCls } from "../ui";
 import { BizHeader } from "./biz-header";
+import { OwnerGate, useOwnerStats } from "./owner-gate";
 
 type Form = "special" | "offer" | "event" | null;
 
 export function Dashboard() {
-  const { ready, owner: r, now, saveCapture, addMedia, setSpecial, addPost } = useStore();
+  return (
+    <OwnerGate>
+      <DashboardInner />
+    </OwnerGate>
+  );
+}
+
+function DashboardInner() {
+  const { owner, now, uploadMedia, setSpecial, addPost } = useStore();
+  const r = owner!;
+  const stats = useOwnerStats(r.id);
   const [camera, setCamera] = useState<SectionKey | null>(null);
   const [form, setForm] = useState<Form>(null);
   const [toast, setToast] = useState<string | null>(null);
-
-  if (!ready) return <Splash />;
-  if (!r)
-    return (
-      <div className="grid min-h-dvh place-items-center p-8 text-center">
-        <div>
-          <p className="font-display text-2xl font-bold">No restaurant yet</p>
-          <Link href="/business/onboarding" className="mt-4 inline-block rounded-full bg-ink px-5 py-3 font-bold text-white">
-            Start onboarding
-          </Link>
-        </div>
-      </div>
-    );
 
   const latest = latestBySection(r);
   const score = transparencyScore(r, now);
@@ -70,11 +68,25 @@ export function Dashboard() {
         </div>
 
         <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">
-          <Stat label="Profile views" value={num(r.stats.profileViews)} delta="+12% this week" />
-          <Stat label="Kitchen views" value={num(r.stats.kitchenViews)} delta="+18% this week" accent />
-          <Stat label="QR scans" value={num(r.stats.qrScans)} delta="Table QR is #1" />
-          <Stat label="Reviews" value={num(r.stats.reviews)} delta={r.google ? `${r.google.rating} ★ on Google` : "—"} />
+          <Stat label="Profile views" value={stats ? num(stats.profileViews) : "…"} delta="Updates live" />
+          <Stat
+            label="Kitchen views"
+            value={stats ? num(stats.kitchenViews) : "…"}
+            delta={stats?.profileViews ? `${Math.round((stats.kitchenViews / stats.profileViews) * 100)}% of visitors peek inside` : "Peeks inside"}
+            accent
+          />
+          <Stat label="QR scans" value={stats ? num(stats.qrScans) : "…"} delta="From your printed QRs" />
+          <Stat label="Reviews" value={stats ? num(stats.reviews) : "…"} delta={r.google ? `${r.google.rating} ★ on Google` : "—"} />
         </div>
+
+        {r.status !== "live" && (
+          <Link
+            href="/business/onboarding"
+            className="mt-4 flex items-center gap-3 rounded-[22px] bg-grape p-4 text-sm font-semibold text-white"
+          >
+            {r.status === "draft" ? "Your profile isn't public yet. Finish onboarding and hit publish →" : "Your profile is suspended. Contact InsideOut support."}
+          </Link>
+        )}
 
         {stalest && (
           <button
@@ -202,8 +214,7 @@ export function Dashboard() {
           section={camera}
           onClose={() => setCamera(null)}
           onCaptured={async (blob, kind, caption) => {
-            const m = await saveCapture(camera, blob, kind, caption);
-            addMedia(r.id, m);
+            await uploadMedia(r.id, camera, blob, kind, caption);
             flash(`${sectionInfo(camera).label} is live 🟢`);
           }}
         />
@@ -212,23 +223,27 @@ export function Dashboard() {
       <SpecialForm
         open={form === "special"}
         onClose={() => setForm(null)}
-        onSave={(s) => {
-          setSpecial(r.id, { ...s, image: s.image ?? r.special?.image });
-          flash("Today's special is live 🍛");
+        onSave={async (s) => {
+          try {
+            await setSpecial(r.id, { name: s.name, price: s.price, note: s.note, imagePath: s.image ?? r.special?.image });
+            flash("Today's special is live 🍛");
+          } catch (e) {
+            flash(e instanceof Error ? e.message : "Could not save");
+          }
         }}
-        onPhoto={async (blob) => {
-          const m = await saveCapture("food", blob, "photo");
-          addMedia(r.id, m);
-          return m.src;
-        }}
+        onPhoto={(blob) => uploadMedia(r.id, "food", blob, "photo")}
       />
       <PostForm
         kind={form === "event" ? "event" : "offer"}
         open={form === "offer" || form === "event"}
         onClose={() => setForm(null)}
-        onSave={(p) => {
-          addPost(r.id, p);
-          flash(p.kind === "offer" ? "Offer posted 🎁" : "Event posted 🎉");
+        onSave={async (p) => {
+          try {
+            await addPost(r.id, p);
+            flash(p.kind === "offer" ? "Offer posted 🎁" : "Event posted 🎉");
+          } catch (e) {
+            flash(e instanceof Error ? e.message : "Could not post");
+          }
         }}
       />
 

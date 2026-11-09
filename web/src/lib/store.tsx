@@ -1,172 +1,218 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { areaByName, distanceKm } from "./areas";
+import { RESTAURANT_SELECT, toRestaurant, type RestaurantRow } from "./db";
 import { DAY } from "./freshness";
-import { clearBlobs, putBlob } from "./media-db";
-import { OWNER_DEMO_ID, seedRestaurants } from "./seed";
-import type { Media, MediaKind, Post, Restaurant, SectionKey, Special } from "./types";
+import { compressPhoto, extFor } from "./image";
+import { MEDIA_BUCKET, authHeader, supabase } from "./supabase";
+import type { MediaKind, Post, Restaurant, SectionKey, Stats } from "./types";
 
-const KEY = "insideout:v1";
+const PREFS_KEY = "insideout:prefs";
 
-interface Persisted {
-  restaurants: Restaurant[];
-  offsetDays: number;
-  ownerId: string;
-}
-
-type StatKey = keyof Restaurant["stats"];
-
-export type NewRestaurantInput = Omit<Restaurant, "id" | "slug" | "stats" | "posts" | "reviews" | "createdAt" | "distanceKm">;
+type EventKind = "profile_view" | "kitchen_view" | "qr_scan";
 
 interface StoreValue {
   ready: boolean;
   now: number;
   offsetDays: number;
+  area: string;
+  user: User | null;
+  isAdmin: boolean;
+  /** Live restaurants, with distance from the selected area */
   restaurants: Restaurant[];
   owner: Restaurant | undefined;
   bySlug: (slug: string) => Restaurant | undefined;
-  saveCapture: (section: SectionKey, blob: Blob, kind: MediaKind, caption?: string) => Promise<Media>;
-  addMedia: (restaurantId: string, media: Media) => void;
-  setSpecial: (restaurantId: string, special: Omit<Special, "id" | "postedAt">) => void;
-  addPost: (restaurantId: string, post: Omit<Post, "id" | "postedAt">) => void;
-  bump: (restaurantId: string, key: StatKey) => void;
-  createRestaurant: (input: NewRestaurantInput) => Restaurant;
+  refresh: () => Promise<void>;
+  fetchStats: (restaurantId: string) => Promise<Stats | null>;
+  uploadMedia: (restaurantId: string, section: SectionKey, blob: Blob, kind: MediaKind, caption?: string) => Promise<string>;
+  setSpecial: (restaurantId: string, s: { name: string; price: number; note?: string; imagePath?: string }) => Promise<void>;
+  addPost: (restaurantId: string, p: Omit<Post, "id" | "postedAt">) => Promise<void>;
+  track: (restaurantId: string, kind: EventKind, source?: string) => void;
+  setArea: (area: string) => void;
   setOffsetDays: (days: number) => void;
-  reset: () => Promise<void>;
+  resetDemo: () => Promise<void>;
+  signOut: () => Promise<void>;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
-const slugify = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/&/g, "and")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "") || "restaurant";
-
-function fresh(): Persisted {
-  return { restaurants: seedRestaurants(Date.now()), offsetDays: 0, ownerId: OWNER_DEMO_ID };
+export function newId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  const h = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
-function load(): Persisted | null {
+function loadPrefs(): { area: string; offsetDays: number } {
   try {
-    const raw = localStorage.getItem(KEY);
-    return raw ? (JSON.parse(raw) as Persisted) : null;
+    return { area: "Secunderabad", offsetDays: 0, ...JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}") };
   } catch {
-    return null;
-  }
-}
-
-function save(d: Persisted) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(d));
-  } catch (e) {
-    console.warn("InsideOut demo: could not persist state", e);
+    return { area: "Secunderabad", offsetDays: 0 };
   }
 }
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
-  const [data, setData] = useState<Persisted | null>(null);
+  const [rows, setRows] = useState<Restaurant[] | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  const [prefs, setPrefs] = useState({ area: "Secunderabad", offsetDays: 0 });
   const [clock, setClock] = useState(0);
+  const [booted, setBooted] = useState(false);
+  const userRef = useRef<User | null>(null);
+
+  const refresh = useCallback(async () => {
+    const { data, error } = await supabase.from("restaurants").select(RESTAURANT_SELECT);
+    if (error) {
+      console.error("Could not load restaurants", error);
+      setRows((prev) => prev ?? []);
+      return;
+    }
+    setRows((data as unknown as RestaurantRow[]).map(toRestaurant));
+  }, []);
+
+  const loadAccount = useCallback(async (u: User | null) => {
+    userRef.current = u;
+    if (!u) {
+      setUser(null);
+      setIsAdmin(false);
+      setOwnerId(null);
+      return;
+    }
+    const [{ data: adminRow }, { data: member }] = await Promise.all([
+      supabase.from("app_admins").select("user_id").eq("user_id", u.id).maybeSingle(),
+      supabase.from("restaurant_members").select("restaurant_id").eq("user_id", u.id).limit(1).maybeSingle(),
+    ]);
+    setIsAdmin(!!adminRow);
+    setOwnerId(member?.restaurant_id ?? null);
+    setUser(u);
+  }, []);
 
   useEffect(() => {
     queueMicrotask(() => {
-      const initial = load() ?? fresh();
-      save(initial);
-      setData(initial);
+      setPrefs(loadPrefs());
       setClock(Date.now());
     });
     const tick = setInterval(() => setClock(Date.now()), 30_000);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === KEY && e.newValue) setData(JSON.parse(e.newValue));
-    };
-    window.addEventListener("storage", onStorage);
+
+    supabase.auth.getSession().then(async ({ data }) => {
+      await Promise.all([loadAccount(data.session?.user ?? null), refresh()]);
+      setBooted(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED") {
+        if ((session?.user?.id ?? null) !== (userRef.current?.id ?? null)) {
+          loadAccount(session?.user ?? null).then(refresh);
+        }
+      }
+    });
+
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    const poll = setInterval(refresh, 60_000);
     return () => {
       clearInterval(tick);
-      window.removeEventListener("storage", onStorage);
+      clearInterval(poll);
+      window.removeEventListener("focus", onFocus);
+      sub.subscription.unsubscribe();
     };
-  }, []);
+  }, [refresh, loadAccount]);
 
-  const offsetDays = data?.offsetDays ?? 0;
-  const now = clock + offsetDays * DAY;
-  const nowRef = useRef(now);
-  useEffect(() => {
-    nowRef.current = now;
-  }, [now]);
-
-  const update = useCallback((fn: (d: Persisted) => Persisted) => {
-    setData((prev) => {
-      if (!prev) return prev;
-      const next = fn(prev);
-      save(next);
+  const savePrefs = useCallback((patch: Partial<typeof prefs>) => {
+    setPrefs((p) => {
+      const next = { ...p, ...patch };
+      localStorage.setItem(PREFS_KEY, JSON.stringify(next));
       return next;
     });
   }, []);
 
-  const patchRestaurant = useCallback(
-    (id: string, fn: (r: Restaurant) => Restaurant) =>
-      update((d) => ({ ...d, restaurants: d.restaurants.map((r) => (r.id === id ? fn(r) : r)) })),
-    [update],
-  );
+  const now = clock + prefs.offsetDays * DAY;
 
   const value = useMemo<StoreValue>(() => {
-    const restaurants = data?.restaurants ?? [];
+    const origin = areaByName(prefs.area);
+    const all = (rows ?? []).map((r) => ({
+      ...r,
+      distanceKm: r.lat != null && r.lng != null ? Math.round(distanceKm(origin, { lat: r.lat, lng: r.lng }) * 10) / 10 : 0,
+    }));
+
     return {
-      ready: data !== null,
+      ready: booted && rows !== null && clock > 0,
       now,
-      offsetDays,
-      restaurants,
-      owner: restaurants.find((r) => r.id === data?.ownerId),
-      bySlug: (slug) => restaurants.find((r) => r.slug === slug),
-
-      saveCapture: async (section, blob, kind, caption) => {
-        const id = uid();
-        await putBlob(id, blob);
-        return { id, section, kind, src: `idb:${id}`, capturedAt: Date.now() + (data?.offsetDays ?? 0) * DAY, caption };
+      offsetDays: prefs.offsetDays,
+      area: prefs.area,
+      user,
+      isAdmin,
+      restaurants: all.filter((r) => r.status === "live"),
+      owner: all.find((r) => r.id === ownerId),
+      bySlug: (slug) => all.find((r) => r.slug === slug),
+      refresh: async () => {
+        await loadAccount(userRef.current);
+        await refresh();
       },
 
-      addMedia: (restaurantId, media) => patchRestaurant(restaurantId, (r) => ({ ...r, media: [...r.media, media] })),
-
-      setSpecial: (restaurantId, special) =>
-        patchRestaurant(restaurantId, (r) => ({ ...r, special: { ...special, id: uid(), postedAt: nowRef.current } })),
-
-      addPost: (restaurantId, post) =>
-        patchRestaurant(restaurantId, (r) => ({ ...r, posts: [{ ...post, id: uid(), postedAt: nowRef.current }, ...r.posts] })),
-
-      bump: (restaurantId, key) =>
-        patchRestaurant(restaurantId, (r) => ({ ...r, stats: { ...r.stats, [key]: r.stats[key] + 1 } })),
-
-      createRestaurant: (input) => {
-        const taken = new Set(restaurants.map((r) => r.slug));
-        let slug = slugify(input.name);
-        for (let n = 2; taken.has(slug); n++) slug = `${slugify(input.name)}-${n}`;
-        const created: Restaurant = {
-          ...input,
-          id: slug,
-          slug,
-          distanceKm: 0.8,
-          posts: [],
-          reviews: [],
-          stats: { profileViews: 0, kitchenViews: 0, qrScans: 0, reviews: 0 },
-          createdAt: nowRef.current,
-        };
-        update((d) => ({ ...d, ownerId: created.id, restaurants: [created, ...d.restaurants.filter((r) => r.id !== created.id)] }));
-        return created;
+      fetchStats: async (restaurantId) => {
+        const { data } = await supabase.rpc("restaurant_stats", { rid: restaurantId });
+        return (data as Stats | null) ?? null;
       },
 
-      setOffsetDays: (days) => update((d) => ({ ...d, offsetDays: days })),
+      uploadMedia: async (restaurantId, section, blob, kind, caption) => {
+        const file = kind === "photo" ? await compressPhoto(blob) : blob;
+        const type = file.type || (kind === "photo" ? "image/jpeg" : "video/mp4");
+        const path = `${restaurantId}/${section}-${newId()}.${extFor(type)}`;
+        const up = await supabase.storage.from(MEDIA_BUCKET).upload(path, file, { contentType: type, upsert: false });
+        if (up.error) throw new Error(up.error.message);
+        const ins = await supabase.from("media").insert({ restaurant_id: restaurantId, section, kind, storage_path: path, caption: caption ?? null });
+        if (ins.error) throw new Error(ins.error.message);
+        if (prefs.offsetDays) savePrefs({ offsetDays: 0 });
+        await refresh();
+        return path;
+      },
 
-      reset: async () => {
-        await clearBlobs().catch(() => {});
-        const next = fresh();
-        save(next);
-        setData(next);
-        setClock(Date.now());
+      setSpecial: async (restaurantId, s) => {
+        const { error } = await supabase.from("specials").insert({
+          restaurant_id: restaurantId,
+          name: s.name,
+          price: s.price,
+          note: s.note ?? null,
+          image_path: s.imagePath ?? null,
+        });
+        if (error) throw new Error(error.message);
+        await refresh();
+      },
+
+      addPost: async (restaurantId, p) => {
+        const { error } = await supabase.from("posts").insert({ restaurant_id: restaurantId, kind: p.kind, title: p.title, detail: p.detail ?? null });
+        if (error) throw new Error(error.message);
+        await refresh();
+      },
+
+      track: (restaurantId, kind, source) => {
+        supabase
+          .from("view_events")
+          .insert({ restaurant_id: restaurantId, kind, source: source ?? null })
+          .then(({ error }) => error && console.warn("track failed", error.message));
+      },
+
+      setArea: (area) => savePrefs({ area }),
+      setOffsetDays: (days) => savePrefs({ offsetDays: days }),
+
+      resetDemo: async () => {
+        const res = await fetch("/api/demo/reset", { method: "POST", headers: await authHeader() });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error ?? "Reset failed");
+        savePrefs({ offsetDays: 0 });
+        await refresh();
+      },
+
+      signOut: async () => {
+        await supabase.auth.signOut();
+        await loadAccount(null);
+        await refresh();
       },
     };
-  }, [data, now, offsetDays, patchRestaurant, update]);
+  }, [booted, rows, clock, now, prefs, user, isAdmin, ownerId, refresh, loadAccount, savePrefs]);
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }

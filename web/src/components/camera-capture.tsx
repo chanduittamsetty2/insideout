@@ -35,6 +35,7 @@ export function CameraCapture({
   const [result, setResult] = useState<Result | null>(null);
   const [caption, setCaption] = useState("");
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -128,9 +129,15 @@ export function CameraCapture({
   async function post() {
     if (!result) return;
     setSaving(true);
-    await onCaptured(result.blob, result.kind, caption.trim() || undefined);
-    setSaving(false);
-    onClose();
+    setError("");
+    try {
+      await onCaptured(result.blob, result.kind, caption.trim() || undefined);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Upload failed. Try again.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   const shutter = () => {
@@ -219,6 +226,7 @@ export function CameraCapture({
             <div className="flex items-center gap-2 rounded-2xl bg-lime/10 px-3 py-2.5 text-xs text-lime">
               <ShieldCheck className="size-4 shrink-0" /> InsideOut stamps the exact upload time. It can&apos;t be edited later.
             </div>
+            {error && <p className="rounded-2xl bg-stale/20 px-3 py-2 text-xs font-semibold text-white">{error}</p>}
             <div className="flex gap-2">
               <button onClick={retake} className="flex flex-1 items-center justify-center gap-2 rounded-full bg-white/10 py-3.5 font-bold">
                 <RotateCcw className="size-4" /> Retake

@@ -62,15 +62,17 @@ export function RestaurantCard({ r, now, index = 0 }: { r: Restaurant; now: numb
               {foodToday ? "Food updated today" : `Food ${timeAgo(food, now)}`}
             </span>
           )}
-          <span
-            className={cn(
-              "inline-flex items-center gap-1 rounded-full border border-line bg-card px-2.5 py-1",
-              !r.fssai.verified && "text-muted",
-            )}
-          >
-            <BadgeCheck className={cn("size-3.5", r.fssai.verified ? "text-fresh-ink" : "text-muted")} />
-            FSSAI {r.fssai.verified ? "verified" : "pending"}
-          </span>
+          {r.fssai && (
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full border border-line bg-card px-2.5 py-1",
+                !r.fssai.verified && "text-muted",
+              )}
+            >
+              <BadgeCheck className={cn("size-3.5", r.fssai.verified ? "text-fresh-ink" : "text-muted")} />
+              FSSAI {r.fssai.verified ? "verified" : "pending"}
+            </span>
+          )}
           {freshLevel(kitchen, now) === "outdated" && (
             <span className="rounded-full bg-stale/10 px-2.5 py-1 text-stale">Kitchen not updated in 30+ days</span>
           )}

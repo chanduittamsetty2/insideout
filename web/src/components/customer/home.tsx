@@ -5,7 +5,8 @@ import { useMemo, useState } from "react";
 import { ArrowRight, ChevronDown, MapPin, Search, SlidersHorizontal } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { DAY, freshLevel, lastUpdate, timeAgo, transparencyScore } from "@/lib/freshness";
-import { AREAS, CUISINES } from "@/lib/seed";
+import { AREAS } from "@/lib/areas";
+import { CUISINES } from "@/lib/seed";
 import { cn, isOpen } from "@/lib/format";
 import type { Restaurant } from "@/lib/types";
 import { RestaurantCard } from "../restaurant-card";
@@ -15,8 +16,7 @@ import { Logo, Media, Sheet, Splash } from "../ui";
 type Sort = "nearby" | "freshest" | "rated";
 
 export function Home() {
-  const { ready, restaurants, now, bump } = useStore();
-  const [area, setArea] = useState("Secunderabad");
+  const { ready, restaurants, now, track, area, setArea } = useStore();
   const [areaOpen, setAreaOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [cuisine, setCuisine] = useState<string | null>(null);
@@ -46,10 +46,9 @@ export function Home() {
     return filtered.sort((a, b) => {
       if (sort === "freshest") return (lastUpdate(b) ?? 0) - (lastUpdate(a) ?? 0);
       if (sort === "rated") return (b.google?.rating ?? 0) - (a.google?.rating ?? 0);
-      const areaBias = Number(b.area === area) - Number(a.area === area);
-      return areaBias || a.distanceKm - b.distanceKm;
+      return a.distanceKm - b.distanceKm;
     });
-  }, [restaurants, query, cuisine, openNow, freshOnly, sort, area, now]);
+  }, [restaurants, query, cuisine, openNow, freshOnly, sort, now]);
 
   if (!ready) return <Splash />;
 
@@ -102,7 +101,7 @@ export function Home() {
                 key={r.id}
                 onClick={() => {
                   setStory(r);
-                  bump(r.id, "kitchenViews");
+                  track(r.id, "kitchen_view");
                 }}
                 className="flex w-[74px] shrink-0 flex-col items-center gap-1.5"
               >
@@ -190,14 +189,16 @@ export function Home() {
             List your restaurant <ArrowRight className="size-4" />
           </span>
         </Link>
-        <p className="mt-6 text-center text-xs text-muted">
-          Avg transparency nearby: {Math.round(restaurants.reduce((s, r) => s + transparencyScore(r, now), 0) / restaurants.length)}%
-        </p>
+        {restaurants.length > 0 && (
+          <p className="mt-6 text-center text-xs text-muted">
+            Avg transparency nearby: {Math.round(restaurants.reduce((s, r) => s + transparencyScore(r, now), 0) / restaurants.length)}%
+          </p>
+        )}
       </section>
 
       <Sheet open={areaOpen} onClose={() => setAreaOpen(false)} title="Where are you?">
         <div className="grid grid-cols-2 gap-2">
-          {AREAS.map((a) => (
+          {AREAS.map(({ name: a }) => (
             <button
               key={a}
               onClick={() => {

@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { LEVEL_STYLE, freshLabel, freshLevel } from "@/lib/freshness";
 import { cn } from "@/lib/format";
-import { useMediaSrc } from "@/lib/use-media-src";
 import type { MediaKind } from "@/lib/types";
 
 export function Logo({ className, invert }: { className?: string; invert?: boolean }) {
@@ -64,7 +63,7 @@ export function Media({
   autoPlay?: boolean;
   onEnded?: () => void;
 }) {
-  const resolved = useMediaSrc(src);
+  const resolved = src;
   const [failed, setFailed] = useState<string | null>(null);
 
   if (!resolved || failed === resolved) {

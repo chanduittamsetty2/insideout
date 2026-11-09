@@ -1,6 +1,8 @@
 import { ALL_SECTIONS, VEG_SECTIONS } from "./sections";
 import { DAY, HOUR, MINUTE } from "./freshness";
-import type { Media, Restaurant, SectionKey } from "./types";
+import type { Media, Restaurant, SectionKey, Stats } from "./types";
+
+export type SeedRestaurant = Omit<Restaurant, "status" | "isDemo" | "lat" | "lng"> & { stats: Stats };
 
 const u = (id: string, w = 900) => `https://images.unsplash.com/${id}?w=${w}&q=70&auto=format&fit=crop`;
 
@@ -47,7 +49,7 @@ function shots(id: string, now: number, list: Shot[]): Media[] {
   }));
 }
 
-export function seedRestaurants(now: number): Restaurant[] {
+export function seedRestaurants(now: number): SeedRestaurant[] {
   const base = {
     links: { swiggy: "https://www.swiggy.com/city/hyderabad", zomato: "https://www.zomato.com/hyderabad" },
     posts: [],
@@ -297,7 +299,5 @@ export function seedRestaurants(now: number): Restaurant[] {
     },
   ];
 }
-
-export const AREAS = ["Secunderabad", "Gachibowli", "Jubilee Hills", "Banjara Hills", "Madhapur", "Abids", "Tolichowki", "Kukatpally"];
 
 export const CUISINES = ["Biryani", "South Indian", "Hyderabadi", "Healthy", "Irani Cafe", "Street Food", "North Indian", "Chinese"];

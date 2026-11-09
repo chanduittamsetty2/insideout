@@ -2,140 +2,252 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { QRCodeSVG } from "qrcode.react";
-import { ArrowLeft, ArrowRight, Camera, Check, FileCheck2, Loader2, Mail, Search, Sparkles, Upload } from "lucide-react";
-import { useStore, uid } from "@/lib/store";
+import { ArrowLeft, ArrowRight, Camera, Check, FileCheck2, Loader2, Search, Sparkles, Upload } from "lucide-react";
+import { useStore, newId } from "@/lib/store";
 import { ALL_SECTIONS, SECTIONS, VEG_SECTIONS } from "@/lib/sections";
-import { AREAS, CUISINES, IMG } from "@/lib/seed";
+import { AREAS, areaByName } from "@/lib/areas";
+import { CUISINES, IMG } from "@/lib/seed";
+import { latestBySection } from "@/lib/freshness";
+import { extFor } from "@/lib/image";
+import { DOCS_BUCKET, authHeader, supabase } from "@/lib/supabase";
 import { cn } from "@/lib/format";
-import type { Fssai, Media as MediaT, Restaurant, SectionKey } from "@/lib/types";
+import type { Fssai, Restaurant, SectionKey } from "@/lib/types";
+import type { PlaceResult } from "@/app/api/places/search/route";
 import { CameraCapture } from "../camera-capture";
-import { Button, Field, Logo, Media, inputCls } from "../ui";
+import { Button, Field, Logo, Media, Splash, inputCls } from "../ui";
 
 const STEPS = ["Register", "Verify", "Build profile", "Publish"];
-const DEMO_OTP = "123456";
 
-interface GoogleHit {
-  name: string;
-  address: string;
-  area: string;
-  phone: string;
-  rating: number;
-  count: number;
-}
+const SAMPLES: Record<SectionKey, string> = {
+  kitchen: IMG.kitchenTeam,
+  fridge: IMG.fridge,
+  meat: IMG.meat,
+  veggies: IMG.veggiesShelf,
+  food: IMG.curries,
+  dining: IMG.diningBright,
+};
 
-function mockGoogle(q: string): GoogleHit[] {
-  const name = q.trim().replace(/\b\w/g, (c) => c.toUpperCase());
-  return [
-    { name, address: "Road No. 10, Banjara Hills, Hyderabad 500034", area: "Banjara Hills", phone: "+91 40 2335 1234", rating: 4.4, count: 1836 },
-    { name: `${name} Restaurant`, address: "Hitech City Main Road, Madhapur, Hyderabad 500081", area: "Madhapur", phone: "+91 98490 12345", rating: 4.1, count: 642 },
-  ];
-}
+const slugify = (s: string) =>
+  `${s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "restaurant"}-${Math.random().toString(36).slice(2, 6)}`;
 
 export function Onboarding() {
-  const { ready, saveCapture, createRestaurant } = useStore();
+  const { ready, user, owner } = useStore();
+  const router = useRouter();
+  const path = usePathname();
+  const [justPublished, setJustPublished] = useState(false);
+
+  useEffect(() => {
+    if (ready && !user) router.replace(`/business/login?next=${encodeURIComponent(path)}`);
+  }, [ready, user, router, path]);
+
+  if (!ready || !user) return <Splash />;
+  if (owner?.status === "live" || (justPublished && owner)) return <Published r={owner} />;
+  return <OnboardingForm existing={owner} onPublished={() => setJustPublished(true)} />;
+}
+
+function OnboardingForm({ existing, onPublished }: { existing?: Restaurant; onPublished: () => void }) {
+  const { user, refresh, uploadMedia } = useStore();
   const [step, setStep] = useState(0);
-  const [published, setPublished] = useState<Restaurant | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [restaurantId, setRestaurantId] = useState<string | null>(existing?.id ?? null);
 
   // Step 1
   const [gq, setGq] = useState("");
-  const [hit, setHit] = useState<GoogleHit | null>(null);
-  const [name, setName] = useState("");
-  const [address, setAddress] = useState("");
-  const [area, setArea] = useState(AREAS[0]);
-  const [phone, setPhone] = useState("");
-  const [cuisines, setCuisines] = useState<string[]>([]);
-  const [open, setOpen] = useState("11:00");
-  const [close, setClose] = useState("23:00");
-  const [isVeg, setIsVeg] = useState(false);
-  const [priceForTwo, setPriceForTwo] = useState("500");
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<PlaceResult[] | null>(null);
+  const [googleDown, setGoogleDown] = useState(false);
+  const [hit, setHit] = useState<PlaceResult | null>(null);
+  const [name, setName] = useState(existing?.name ?? "");
+  const [address, setAddress] = useState(existing?.address ?? "");
+  const [area, setArea] = useState(existing?.area ?? AREAS[0].name);
+  const [phone, setPhone] = useState(existing?.phone ?? "");
+  const [cuisines, setCuisines] = useState<string[]>(existing?.cuisines ?? []);
+  const [open, setOpen] = useState(existing?.hours.open ?? "11:00");
+  const [close, setClose] = useState(existing?.hours.close ?? "23:00");
+  const [isVeg, setIsVeg] = useState(existing?.isVeg ?? false);
+  const [priceForTwo, setPriceForTwo] = useState(String(existing?.priceForTwo ?? 500));
 
   // Step 2
-  const [email, setEmail] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [otp, setOtp] = useState("");
-  const [ownerName, setOwnerName] = useState("");
-  const [fssaiNo, setFssaiNo] = useState("");
-  const [fssaiType, setFssaiType] = useState<Fssai["type"]>("State License");
-  const [validTill, setValidTill] = useState("");
-  const [certificate, setCertificate] = useState<string | null>(null);
+  const [fssaiNo, setFssaiNo] = useState(existing?.fssai?.number ?? "");
+  const [fssaiType, setFssaiType] = useState<Fssai["type"]>(existing?.fssai?.type ?? "State License");
+  const [validTill, setValidTill] = useState(existing?.fssai?.validTill ?? "");
+  const [certificate, setCertificate] = useState<File | null>(null);
 
   // Step 3
-  const [media, setMedia] = useState<Partial<Record<SectionKey, MediaT>>>({});
   const [camera, setCamera] = useState<SectionKey | null>(null);
-  const [swiggy, setSwiggy] = useState("");
-  const [zomato, setZomato] = useState("");
+  const [swiggy, setSwiggy] = useState(existing?.links.swiggy ?? "");
+  const [zomato, setZomato] = useState(existing?.links.zomato ?? "");
 
   const sections = isVeg ? VEG_SECTIONS : ALL_SECTIONS;
-  const emailVerified = otp === DEMO_OTP;
+  const media = existing ? latestBySection(existing) : {};
   const captured = sections.filter((k) => media[k]);
 
   const canNext = [
-    name.trim() && address.trim() && phone.trim() && cuisines.length > 0,
-    emailVerified && /^\d{14}$/.test(fssaiNo) && ownerName.trim(),
+    name.trim() && address.trim() && cuisines.length > 0,
+    /^\d{14}$/.test(fssaiNo),
     !!media.kitchen && captured.length >= 3,
     true,
   ][step];
 
   useEffect(() => window.scrollTo({ top: 0, behavior: "smooth" }), [step]);
 
-  const pickHit = (h: GoogleHit) => {
+  async function searchGoogle() {
+    if (gq.trim().length < 3 || searching) return;
+    setSearching(true);
+    setGoogleDown(false);
+    try {
+      const res = await fetch("/api/places/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(await authHeader()) },
+        body: JSON.stringify({ query: gq }),
+      });
+      const data = (await res.json()) as { results?: PlaceResult[]; unavailable?: boolean };
+      setResults(data.results ?? []);
+      setGoogleDown(!!data.unavailable);
+    } catch {
+      setResults([]);
+      setGoogleDown(true);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  const pickHit = (h: PlaceResult) => {
     setHit(h);
     setName(h.name);
     setAddress(h.address);
     setArea(h.area);
-    setPhone(h.phone);
+    if (h.phone) setPhone(h.phone);
+    if (h.hours) {
+      setOpen(h.hours.open);
+      setClose(h.hours.close);
+    }
+    setResults(null);
     setGq("");
   };
 
-  const useSamples = () => {
-    const now = Date.now();
-    const samples: Record<SectionKey, string> = {
-      kitchen: IMG.kitchenTeam,
-      fridge: IMG.fridge,
-      meat: IMG.meat,
-      veggies: IMG.veggiesShelf,
-      food: IMG.curries,
-      dining: IMG.diningBright,
-    };
-    setMedia(
-      Object.fromEntries(
-        sections.map((k) => [k, { id: uid(), section: k, kind: "photo", src: samples[k], capturedAt: now } satisfies MediaT]),
-      ),
-    );
-  };
+  async function run(fn: () => Promise<void>) {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
-  const publish = () => {
-    const all = Object.values(media).filter(Boolean) as MediaT[];
-    const food = media.food ?? media.kitchen;
-    const created = createRestaurant({
-      name: name.trim(),
-      tagline: `${cuisines.slice(0, 2).join(" & ")} in ${area}`,
-      cuisines,
-      area,
-      address,
-      phone,
-      hours: { open, close },
-      priceForTwo: Number(priceForTwo) || 500,
-      isVeg,
-      google: hit
-        ? { rating: hit.rating, count: hit.count, mapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${hit.name} ${hit.address}`)}` }
-        : null,
-      links: { swiggy: swiggy.trim() || undefined, zomato: zomato.trim() || undefined },
-      fssai: { number: fssaiNo, type: fssaiType, validTill: validTill || "2027-12-31", verified: false },
-      cover: food?.src ?? IMG.spread,
-      sections,
-      media: all,
-      ownerEmail: email,
+  const saveBasics = () =>
+    run(async () => {
+      const c = areaByName(area);
+      const row = {
+        name: name.trim(),
+        tagline: `${cuisines.slice(0, 2).join(" & ")} in ${area}`,
+        cuisines,
+        area,
+        address: address.trim(),
+        phone: phone.trim() || null,
+        lat: hit?.lat ?? existing?.lat ?? c.lat,
+        lng: hit?.lng ?? existing?.lng ?? c.lng,
+        opens_at: open,
+        closes_at: close,
+        price_for_two: Number(priceForTwo) || 500,
+        is_veg: isVeg,
+        sections,
+        ...(hit && {
+          google_place_id: hit.placeId,
+          google_rating: hit.rating,
+          google_rating_count: hit.count,
+          google_maps_url: hit.mapsUrl || null,
+          google_synced_at: new Date().toISOString(),
+        }),
+      };
+      if (restaurantId) {
+        const { error } = await supabase.from("restaurants").update(row).eq("id", restaurantId);
+        if (error) throw new Error(error.message);
+      } else {
+        const id = newId();
+        const { error } = await supabase.from("restaurants").insert({ id, slug: slugify(name), ...row });
+        if (error) {
+          if (error.code === "23505" && error.message.includes("google_place_id"))
+            throw new Error("This Google listing is already on InsideOut. Contact us if it's yours.");
+          throw new Error(error.message);
+        }
+        setRestaurantId(id);
+      }
+      await refresh();
+      setStep(1);
     });
-    setPublished(created);
-  };
 
-  if (!ready) return null;
-  if (published) return <Published r={published} />;
+  const saveFssai = () =>
+    run(async () => {
+      if (!restaurantId) throw new Error("Restaurant not saved yet");
+      let certificatePath: string | undefined;
+      if (certificate) {
+        const path = `${restaurantId}/fssai-${newId()}.${extFor(certificate.type)}`;
+        const up = await supabase.storage.from(DOCS_BUCKET).upload(path, certificate, { contentType: certificate.type });
+        if (up.error) throw new Error(`Certificate upload failed: ${up.error.message}`);
+        certificatePath = path;
+      }
+      const fields = {
+        license_number: fssaiNo,
+        license_type: fssaiType,
+        valid_till: validTill || null,
+        ...(certificatePath && { certificate_path: certificatePath }),
+      };
+      const ins = await supabase.from("fssai_licenses").insert({ restaurant_id: restaurantId, ...fields });
+      if (ins.error?.code === "23505") {
+        const upd = await supabase.from("fssai_licenses").update(fields).eq("restaurant_id", restaurantId);
+        if (upd.error) throw new Error(upd.error.message);
+      } else if (ins.error) {
+        throw new Error(ins.error.message);
+      }
+      await refresh();
+      setStep(2);
+    });
+
+  const useSamples = () =>
+    run(async () => {
+      if (!restaurantId) return;
+      const missing = sections.filter((k) => !media[k]);
+      const { error } = await supabase
+        .from("media")
+        .insert(missing.map((k) => ({ restaurant_id: restaurantId, section: k, kind: "photo", storage_path: SAMPLES[k] })));
+      if (error) throw new Error(error.message);
+      await refresh();
+    });
+
+  const saveLinks = () =>
+    run(async () => {
+      const { error } = await supabase
+        .from("restaurants")
+        .update({ swiggy_url: swiggy.trim() || null, zomato_url: zomato.trim() || null })
+        .eq("id", restaurantId!);
+      if (error) throw new Error(error.message);
+      await refresh();
+      setStep(3);
+    });
+
+  const publish = () =>
+    run(async () => {
+      const cover = media.food ?? media.dining ?? media.kitchen;
+      const { error } = await supabase
+        .from("restaurants")
+        .update({ status: "live", cover_path: cover?.kind === "photo" ? cover.src : null })
+        .eq("id", restaurantId!);
+      if (error) throw new Error(error.message);
+      onPublished();
+      await refresh();
+    });
+
+  const next = [saveBasics, saveFssai, saveLinks, publish][step];
 
   return (
-    <div className="min-h-dvh pb-32">
+    <div className="min-h-dvh pb-36">
       <header className="sticky top-0 z-30 border-b border-line/60 bg-paper/85 backdrop-blur-xl">
         <div className="mx-auto flex max-w-xl items-center gap-3 px-5 py-3">
           {step > 0 ? (
@@ -167,36 +279,57 @@ export function Onboarding() {
           <>
             <StepTitle title="Register your restaurant" sub="Find yourself on Google and we'll fill in the boring bits." />
             <div className="relative">
-              <label className="flex items-center gap-3 rounded-2xl border-2 border-ink bg-card px-4 py-3.5">
-                <Search className="size-5" />
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  searchGoogle();
+                }}
+                className="flex items-center gap-2 rounded-2xl border-2 border-ink bg-card py-1.5 pr-1.5 pl-4"
+              >
+                <Search className="size-5 shrink-0" />
                 <input
                   value={gq}
-                  onChange={(e) => setGq(e.target.value)}
-                  placeholder="Search your restaurant on Google"
-                  className="flex-1 bg-transparent text-[15px] outline-none"
+                  onChange={(e) => {
+                    setGq(e.target.value);
+                    setResults(null);
+                  }}
+                  placeholder="Your restaurant name + area"
+                  aria-label="Search your restaurant on Google"
+                  className="min-w-0 flex-1 bg-transparent py-2 text-[15px] outline-none"
                 />
-              </label>
-              {gq.trim().length >= 3 && (
+                <Button type="submit" disabled={gq.trim().length < 3 || searching} className="shrink-0 px-4 py-2.5 text-sm">
+                  {searching ? <Loader2 className="size-4 animate-spin" /> : "Search"}
+                </Button>
+              </form>
+              {results && (
                 <div className="absolute inset-x-0 top-full z-20 mt-2 overflow-hidden rounded-2xl border border-line bg-card shadow-xl">
-                  {mockGoogle(gq).map((h) => (
-                    <button key={h.address} onClick={() => pickHit(h)} className="flex w-full items-start gap-3 border-b border-line p-3.5 text-left last:border-0 hover:bg-paper">
+                  {results.map((h) => (
+                    <button key={h.placeId} onClick={() => pickHit(h)} className="flex w-full items-start gap-3 border-b border-line p-3.5 text-left last:border-0 hover:bg-paper">
                       <span className="mt-0.5 text-lg">📍</span>
                       <span className="min-w-0 flex-1">
                         <span className="block font-bold">{h.name}</span>
                         <span className="block truncate text-xs text-muted">{h.address}</span>
                       </span>
-                      <span className="shrink-0 text-xs font-bold">
-                        {h.rating} ★ <span className="font-normal text-muted">({h.count.toLocaleString("en-IN")})</span>
-                      </span>
+                      {h.rating != null && (
+                        <span className="shrink-0 text-xs font-bold">
+                          {h.rating} ★ <span className="font-normal text-muted">({h.count.toLocaleString("en-IN")})</span>
+                        </span>
+                      )}
                     </button>
                   ))}
-                  <p className="bg-paper px-3.5 py-2 text-[11px] text-muted">Demo results · live Google Places data once the API key is added</p>
+                  {results.length === 0 && (
+                    <p className="p-4 text-sm text-muted">
+                      {googleDown ? "Google search isn't available right now. Fill in your details below 👇" : "No match on Google. Try adding your area, or fill in below."}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
+            <p className="mt-2 text-[11px] text-muted">Press Search once. Each search is a single lookup on Google Maps.</p>
             {hit && (
               <p className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-fresh-ink">
-                <Check className="size-4" /> Linked to Google · {hit.rating} ★ from {hit.count.toLocaleString("en-IN")} reviews
+                <Check className="size-4" /> Linked to Google
+                {hit.rating != null && ` · ${hit.rating} ★ from ${hit.count.toLocaleString("en-IN")} reviews`}
               </p>
             )}
 
@@ -215,7 +348,7 @@ export function Onboarding() {
                 <Field label="Area">
                   <select className={inputCls} value={area} onChange={(e) => setArea(e.target.value)}>
                     {AREAS.map((a) => (
-                      <option key={a}>{a}</option>
+                      <option key={a.name}>{a.name}</option>
                     ))}
                   </select>
                 </Field>
@@ -280,43 +413,15 @@ export function Onboarding() {
           <>
             <StepTitle title="Verify your restaurant" sub="Quick checks so customers know you're the real deal." />
             <div className="space-y-4">
-              <Field label="Your name">
-                <input className={inputCls} value={ownerName} onChange={(e) => setOwnerName(e.target.value)} placeholder="Owner or manager name" />
-              </Field>
-              <Field label="Email" group>
-                <div className="flex gap-2">
-                  <input
-                    className={inputCls}
-                    type="email"
-                    aria-label="Email"
-                    value={email}
-                    onChange={(e) => {
-                      setEmail(e.target.value);
-                      setOtpSent(false);
-                      setOtp("");
-                    }}
-                    placeholder="you@restaurant.com"
-                  />
-                  <Button variant={otpSent ? "ghost" : "ink"} disabled={!/\S+@\S+\.\S+/.test(email)} onClick={() => setOtpSent(true)} className="shrink-0">
-                    <Mail className="size-4" /> {otpSent ? "Resend" : "Send code"}
-                  </Button>
+              <div className="flex items-center gap-3 rounded-2xl border border-line bg-card p-4">
+                <span className="grid size-9 place-items-center rounded-full bg-fresh text-white">
+                  <Check className="size-4" />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold">Account verified</p>
+                  <p className="truncate text-xs text-muted">{user?.email}</p>
                 </div>
-              </Field>
-              {otpSent && (
-                <div className="animate-rise rounded-2xl border border-line bg-card p-4">
-                  <p className="text-sm font-semibold">Enter the 6-digit code sent to {email}</p>
-                  <OtpInput value={otp} onChange={setOtp} />
-                  {emailVerified ? (
-                    <p className="mt-2 flex items-center gap-1.5 text-sm font-bold text-fresh-ink">
-                      <Check className="size-4" /> Email verified
-                    </p>
-                  ) : (
-                    <p className="mt-2 text-xs text-muted">
-                      Demo code: <span className="font-mono font-bold text-ink">{DEMO_OTP}</span>
-                    </p>
-                  )}
-                </div>
-              )}
+              </div>
 
               <div className="rounded-[24px] bg-card p-4 ring-1 ring-line">
                 <p className="flex items-center gap-2 font-display text-lg font-bold">
@@ -353,9 +458,19 @@ export function Onboarding() {
                     )}
                   >
                     {certificate ? <Check className="size-4" /> : <Upload className="size-4" />}
-                    {certificate ? certificate : "Upload license certificate (photo or PDF)"}
-                    <input type="file" accept="image/*,application/pdf" className="hidden" onChange={(e) => setCertificate(e.target.files?.[0]?.name ?? null)} />
+                    <span className="truncate">{certificate ? certificate.name : "Upload license certificate (photo or PDF)"}</span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,application/pdf"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0] ?? null;
+                        if (f && f.size > 10 * 1024 * 1024) return setError("Certificate must be under 10 MB");
+                        setCertificate(f);
+                      }}
+                    />
                   </label>
+                  <p className="text-[11px] text-muted">Certificates are private. Only you and the InsideOut team can see them.</p>
                 </div>
               </div>
             </div>
@@ -388,7 +503,7 @@ export function Onboarding() {
                           <p className="font-display font-bold">
                             {s.emoji} {s.label}
                           </p>
-                          <p className="text-[11px] text-white/70">Tap to retake</p>
+                          <p className="text-[11px] text-white/70">Tap to add another</p>
                         </div>
                       </>
                     ) : (
@@ -413,9 +528,11 @@ export function Onboarding() {
               <span className="font-semibold text-muted">
                 {captured.length} of {sections.length} added
               </span>
-              <button onClick={useSamples} className="flex items-center gap-1 font-bold text-grape">
-                <Sparkles className="size-3.5" /> Fill with sample photos (demo)
-              </button>
+              {captured.length < sections.length && (
+                <button onClick={useSamples} disabled={busy} className="flex items-center gap-1 font-bold text-grape disabled:opacity-50">
+                  <Sparkles className="size-3.5" /> Fill the rest with sample photos (demo)
+                </button>
+              )}
             </div>
 
             <div className="mt-8 space-y-3">
@@ -441,11 +558,19 @@ export function Onboarding() {
                   {cuisines.join(", ")} · {area}
                 </p>
                 <ul className="mt-4 space-y-2 text-sm">
-                  <SummaryRow ok text={`${captured.length} areas shown, all stamped just now`} />
-                  <SummaryRow ok text={`Email verified · ${email}`} />
+                  <SummaryRow ok text={`${captured.length} areas shown, each with its upload time`} />
+                  <SummaryRow ok text={`Account · ${user?.email}`} />
                   <SummaryRow ok={false} text={`FSSAI ${fssaiNo}: our team will verify within 24h`} />
-                  <SummaryRow ok={!!hit} text={hit ? `Google rating ${hit.rating} ★ linked` : "Google listing not linked"} />
+                  <SummaryRow
+                    ok={!!existing?.google}
+                    text={existing?.google ? `Google rating ${existing.google.rating} ★ linked` : "Google listing not linked"}
+                  />
                 </ul>
+                {existing && (
+                  <Link href={`/r/${existing.slug}`} className="mt-4 inline-block text-sm font-bold underline">
+                    Preview my profile ↗
+                  </Link>
+                )}
               </div>
             </div>
           </>
@@ -454,25 +579,19 @@ export function Onboarding() {
 
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line/60 bg-paper/90 backdrop-blur-xl">
         <div className="mx-auto max-w-xl px-5 py-4">
-          {step < 3 ? (
-            <Button className="w-full py-4" disabled={!canNext} onClick={() => setStep(step + 1)}>
-              Continue <ArrowRight className="size-5" />
-            </Button>
-          ) : (
-            <Button variant="lime" className="w-full py-4 text-base" onClick={publish}>
-              🚀 Publish my profile
-            </Button>
-          )}
+          {error && <p className="mb-2 rounded-2xl bg-stale/10 px-3 py-2 text-sm font-semibold text-stale">{error}</p>}
+          <Button variant={step === 3 ? "lime" : "ink"} className="w-full py-4 text-base" disabled={!canNext || busy} onClick={next}>
+            {busy ? <Loader2 className="size-5 animate-spin" /> : step === 3 ? "🚀 Publish my profile" : <>Save & continue <ArrowRight className="size-5" /></>}
+          </Button>
         </div>
       </div>
 
-      {camera && (
+      {camera && restaurantId && (
         <CameraCapture
           section={camera}
           onClose={() => setCamera(null)}
           onCaptured={async (blob, kind, caption) => {
-            const m = await saveCapture(camera, blob, kind, caption);
-            setMedia((prev) => ({ ...prev, [camera]: m }));
+            await uploadMedia(restaurantId, camera, blob, kind, caption);
           }}
         />
       )}
@@ -497,34 +616,6 @@ function SummaryRow({ ok, text }: { ok: boolean; text: string }) {
       </span>
       {text}
     </li>
-  );
-}
-
-function OtpInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  return (
-    <label className="relative mt-3 flex gap-2">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <span
-          key={i}
-          className={cn(
-            "grid h-12 flex-1 place-items-center rounded-xl border-2 font-mono text-xl font-bold",
-            value.length === i ? "border-ink" : "border-line",
-            value.length === 6 && value === DEMO_OTP && "border-fresh bg-fresh/10",
-          )}
-        >
-          {value[i] ?? ""}
-        </span>
-      ))}
-      <input
-        autoFocus
-        inputMode="numeric"
-        maxLength={6}
-        value={value}
-        onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
-        className="absolute inset-0 opacity-0"
-        aria-label="Verification code"
-      />
-    </label>
   );
 }
 

@@ -21,6 +21,7 @@ import {
   Store,
 } from "lucide-react";
 import { useStore } from "@/lib/store";
+import { supabase } from "@/lib/supabase";
 import { exactStamp, freshLevel, lastUpdate, latestBySection, timeAgo, transparencyScore } from "@/lib/freshness";
 import { SECTIONS } from "@/lib/sections";
 import { cn, compact, isOpen, num, prettyTime, rupees } from "@/lib/format";
@@ -29,7 +30,7 @@ import { StoryViewer } from "../story-viewer";
 import { FreshChip, Logo, Media, ScoreRing, Sheet, Splash } from "../ui";
 
 export function Profile({ slug }: { slug: string }) {
-  const { ready, bySlug, now, bump } = useStore();
+  const { ready, bySlug, now, track } = useStore();
   const r = bySlug(slug);
   const [story, setStory] = useState<MediaT[] | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
@@ -39,9 +40,11 @@ export function Profile({ slug }: { slug: string }) {
   useEffect(() => {
     if (!r || tracked.current) return;
     tracked.current = true;
-    bump(r.id, "profileViews");
-    if (new URLSearchParams(window.location.search).get("src")) bump(r.id, "qrScans");
-  }, [r, bump]);
+    if (r.status !== "live") return;
+    const src = new URLSearchParams(window.location.search).get("src");
+    track(r.id, "profile_view", src && QR_SOURCES.includes(src) ? src : undefined);
+    if (src) track(r.id, "qr_scan", QR_SOURCES.includes(src) ? src : "table");
+  }, [r, track]);
 
   if (!ready) return <Splash />;
   if (!r) return <NotFound />;
@@ -57,7 +60,7 @@ export function Profile({ slug }: { slug: string }) {
     const items = r.media.filter((m) => !key || m.section === key).sort((a, b) => b.capturedAt - a.capturedAt);
     if (!items.length) return;
     setStory(items);
-    bump(r.id, "kitchenViews");
+    if (r.status === "live") track(r.id, "kitchen_view");
   };
 
   const share = async () => {
@@ -70,6 +73,11 @@ export function Profile({ slug }: { slug: string }) {
 
   return (
     <main className="mx-auto min-h-dvh max-w-md pb-32">
+      {r.status !== "live" && (
+        <div className="bg-aging px-4 py-2 text-center text-xs font-bold text-ink">
+          {r.status === "draft" ? "Preview · not published yet. Only you can see this." : "This profile is suspended by InsideOut."}
+        </div>
+      )}
       <section className="relative h-[360px] overflow-hidden">
         <Media src={r.cover} className="absolute inset-0 size-full" alt={r.name} />
         <div className="absolute inset-0 bg-gradient-to-b from-black/45 via-black/10 to-black/80" />
@@ -252,21 +260,32 @@ export function Profile({ slug }: { slug: string }) {
 
         <div className="mt-6 grid grid-cols-2 gap-2">
           {r.google && <ActionLink href={r.google.mapsUrl} icon={<Navigation className="size-4" />} label="Directions" />}
-          <ActionLink href={`tel:${r.phone.replace(/\s/g, "")}`} icon={<Phone className="size-4" />} label="Call" />
+          {r.phone && <ActionLink href={`tel:${r.phone.replace(/\s/g, "")}`} icon={<Phone className="size-4" />} label="Call" />}
           {r.links.swiggy && <ActionLink href={r.links.swiggy} icon={<span className="text-sm">🛵</span>} label="Order on Swiggy" />}
           {r.links.zomato && <ActionLink href={r.links.zomato} icon={<span className="text-sm">🍽️</span>} label="Order on Zomato" />}
         </div>
 
         <SectionTitle eyebrow="Receipts, not promises" title="Why you can trust this" />
         <div className="divide-y divide-line overflow-hidden rounded-[26px] border border-line bg-card">
-          <TrustRow
-            icon={<BadgeCheck className={cn("size-5", r.fssai.verified ? "text-fresh-ink" : "text-muted")} />}
-            title={`FSSAI ${r.fssai.type}`}
-            badge={r.fssai.verified ? { text: "Verified", cls: "bg-fresh/12 text-fresh-ink" } : { text: "Pending", cls: "bg-aging/15 text-aging-ink" }}
-          >
-            Lic. no. <span className="font-mono">{r.fssai.number}</span> · valid till{" "}
-            {new Date(r.fssai.validTill).toLocaleDateString("en-IN", { month: "short", year: "numeric" })}
-          </TrustRow>
+          {r.fssai ? (
+            <TrustRow
+              icon={<BadgeCheck className={cn("size-5", r.fssai.verified ? "text-fresh-ink" : "text-muted")} />}
+              title={`FSSAI ${r.fssai.type}`}
+              badge={r.fssai.verified ? { text: "Verified", cls: "bg-fresh/12 text-fresh-ink" } : { text: "Pending", cls: "bg-aging/15 text-aging-ink" }}
+            >
+              Lic. no. <span className="font-mono">{r.fssai.number}</span>
+              {r.fssai.validTill &&
+                ` · valid till ${new Date(r.fssai.validTill).toLocaleDateString("en-IN", { month: "short", year: "numeric" })}`}
+            </TrustRow>
+          ) : (
+            <TrustRow
+              icon={<BadgeCheck className="size-5 text-muted" />}
+              title="FSSAI license"
+              badge={{ text: "Not added", cls: "bg-stale/12 text-stale" }}
+            >
+              This restaurant hasn&apos;t shared its FSSAI license yet.
+            </TrustRow>
+          )}
           <TrustRow icon={<Clock className="size-5 text-grape" />} title="Live capture, auto time-stamped">
             Photos & videos are shot inside the app. Upload times are recorded by InsideOut. Restaurants can&apos;t edit them.
           </TrustRow>
@@ -366,8 +385,17 @@ export function Profile({ slug }: { slug: string }) {
   );
 }
 
+const QR_SOURCES = ["table", "counter", "menu", "receipt", "entrance", "search", "share"];
+
 function ReportSheet({ open, onClose, restaurant }: { open: boolean; onClose: () => void; restaurant: Restaurant }) {
   const [sent, setSent] = useState(false);
+  const send = (reason: string) => {
+    setSent(true);
+    supabase
+      .from("reports")
+      .insert({ restaurant_id: restaurant.id, reason })
+      .then(({ error }) => error && console.warn("report failed", error.message));
+  };
   const close = () => {
     onClose();
     setTimeout(() => setSent(false), 300);
@@ -379,7 +407,7 @@ function ReportSheet({ open, onClose, restaurant }: { open: boolean; onClose: ()
       ) : (
         <div className="space-y-2">
           {["Photos don't match the real place", "Looks like an old photo", "Wrong FSSAI details", "Something else"].map((t) => (
-            <button key={t} onClick={() => setSent(true)} className="w-full rounded-2xl border border-line px-4 py-3 text-left text-sm font-semibold hover:bg-paper">
+            <button key={t} onClick={() => send(t)} className="w-full rounded-2xl border border-line px-4 py-3 text-left text-sm font-semibold hover:bg-paper">
               {t}
             </button>
           ))}

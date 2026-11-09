@@ -2,13 +2,15 @@ export type SectionKey = "kitchen" | "fridge" | "meat" | "veggies" | "food" | "d
 
 export type MediaKind = "photo" | "video";
 
+export type RestaurantStatus = "draft" | "live" | "suspended";
+
 export interface Media {
   id: string;
   section: SectionKey;
   kind: MediaKind;
-  /** http(s) URL, or `idb:<id>` for media captured in this browser */
+  /** Public URL */
   src: string;
-  /** Set by the system at upload time. Restaurants can never edit this. */
+  /** Set by the database at upload time. Restaurants can never edit this. */
   capturedAt: number;
   caption?: string;
 }
@@ -45,29 +47,39 @@ export interface Fssai {
   verified: boolean;
 }
 
+export interface Stats {
+  profileViews: number;
+  kitchenViews: number;
+  qrScans: number;
+  reviews: number;
+}
+
 export interface Restaurant {
   id: string;
   slug: string;
+  status: RestaurantStatus;
+  isDemo: boolean;
   name: string;
   tagline: string;
   cuisines: string[];
   area: string;
   address: string;
   phone: string;
+  lat: number | null;
+  lng: number | null;
+  /** Distance from the customer's selected area. Filled in by the store. */
   distanceKm: number;
   hours: { open: string; close: string };
   priceForTwo: number;
   isVeg: boolean;
   google: { rating: number; count: number; mapsUrl: string } | null;
   links: { swiggy?: string; zomato?: string };
-  fssai: Fssai;
+  fssai: Fssai | null;
   cover: string;
   sections: SectionKey[];
   media: Media[];
   special?: Special;
   posts: Post[];
   reviews: Review[];
-  stats: { profileViews: number; kitchenViews: number; qrScans: number; reviews: number };
-  ownerEmail?: string;
   createdAt: number;
 }
